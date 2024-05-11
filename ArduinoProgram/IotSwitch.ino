@@ -43,15 +43,27 @@ float currentPower = 0, totalElectricity = 0, dailyElectricity = 0;
 unsigned char Tx_Buffer[8] = { 0x01, 0x03, 0x00, 0x48, 0x00, 0x08, 0xC4, 0x1A };  //读取电能模块信息指令
 unsigned char Rx_Buffer[40];
 unsigned long Power_data = 0, Energy_data = 0;
-const char *BrokerServer = "47.115.230.57";         //MQTT Broker地址
-const int BrokerPort = 1883;                        //MQTT Broker端口号
-const int BrokerPortQoS = 1;                        //MQTT Broker QoS级别设置
-const char *BrokerClientID = "esp32_kirtozz";       //MQTT Broker Client ID
-const char *BrokerName = "kirtozz";                 //MQTT Broker用户名
-const char *BrokerPassword = "142857";              //MQTT Broker密码
-const char *willTopic = "iotPower/2001/2333/will";  //MQTT 遗嘱
-const char *willMessage = "IotSwitch has been disconnected !";
+float t = 0;
+const int appUsername = 3;
+const int appEquipmentname = 32;
+const char *BrokerServer = "47.115.230.57";                                                        //MQTT Broker地址
+const int BrokerPort = 1883;                                                                       //MQTT Broker端口号
+const int BrokerPortQoS = 1;                                                                       //MQTT Broker QoS级别设置
+const char *BrokerClientID = "esp32_kirtozz";                                                      //MQTT Broker Client ID
+const char *BrokerName = "kirtozz";                                                                //MQTT Broker用户名
+const char *BrokerPassword = "142857";                                                             //MQTT Broker密码
+String willTopicString = "iotPower/will/" + String(appUsername) + "/" + String(appEquipmentname);  // 使用String连接遗嘱
+const char *willTopic = willTopicString.c_str();                                                   // 转换为const char*类型
+const char *willMessage = "disconnected";
 const int willQoS = 1;
+String topicCommandString = "iotPower/command/" + String(appUsername) + "/" + String(appEquipmentname);
+const char *topicCommand = topicCommandString.c_str();
+String topicAlarmString = "iotPower/alarm/" + String(appUsername) + "/" + String(appEquipmentname);
+const char *topicAlarm = topicAlarmString.c_str();
+String topicStatusString = "iotPower/status/" + String(appUsername) + "/" + String(appEquipmentname);
+const char *topicStatus = topicStatusString.c_str();
+String topicUploadString = "iotPower/upload/" + String(appUsername) + "/" + String(appEquipmentname);
+const char *topicUpload = topicUploadString.c_str();
 Ticker timer1, timer2, timer3;  //避免程序阻塞申明的一些计数变量
 int reconnectTime1 = 0, reconnectTime2 = 0;
 unsigned long previousTriggerTime = 0;        // 上次触发时间
@@ -59,13 +71,12 @@ const unsigned long triggerInterval = 60000;  // 触发间隔（毫秒）
 
 typedef struct {
   bool isEffect;
-  bool isLoop;
-  bool exceptStatus;          // 期待触发的开关状态
+  bool exceptStatus;  // 期待触发的开关状态
+  bool isOnly;
   bool triggerDaysOfWeek[7];  // 代表周日到周六的触发状态
   int triggerHour;            // 触发的时刻（小时）
   int triggerMinute;          // 触发的时刻（分钟）
 } ScheduledTime;
-
 ScheduledTime timers[3];  // 最多存储3个定时器
 int size = 3;
 
@@ -106,7 +117,6 @@ void setup() {
   mqttConnection(BrokerName, BrokerPassword, BrokerClientID, BrokerServer, BrokerPort, willTopic, willMessage);
   timer1.attach(30, checkWiFiConnection);  //每隔30s检测一下WIFI连接
   timer2.attach(30, checkMqttConnection);  //每隔30s检测一下mqtt连接
-  timer3.attach(3, publishStatus);         //每隔3s发布状态主题
 }
 
 void loop() {
@@ -115,10 +125,10 @@ void loop() {
   sensors.requestTemperatures();  //温度传感器获取温度
   getPower();
   protection();
-  float t;
-  if (now.Hour() == 0 && now.Minute() == 0)
+  if (now.Hour() == 0 && now.Minute() == 0 && now.Second() == 0)
     t = totalElectricity;
   dailyElectricity = totalElectricity - t;
+  uploadStatus();
   oledDisplay();
   readBLE();
   mqtt.loop();  // 处理信息以及心跳
@@ -176,9 +186,9 @@ void wifiConnection() {
     wifiStatus = 1;
     reconnectTime1 = 0;
     Serial.print("Connected to ");
-    Serial.println(WiFi.SSID());  // 通过串口监视器输出连接的WiFi名称
+    Serial.println(WiFi.SSID());
     Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());     // 通过串口监视器输出ESP8266-NodeMCU的IP
+    Serial.println(WiFi.localIP());
   }
 }
 
@@ -208,7 +218,7 @@ void mqttConnection(const char *userName, const char *userPassword, const char *
   mqtt.setServer(brokerAddress, brokerPort);
   mqtt.setCallback(mqttcallback);
   while (!mqtt.connected() && WiFi.status() == WL_CONNECTED && reconnectTime2 <= 100) {  //在WiFi连接的情况下连接mqtt服务器，最多尝试25s
-    if (mqtt.connect(clientID, userName, userPassword, willTopic, willQoS, true, willMessage)) {
+    if (mqtt.connect(clientID, userName, userPassword, willTopic, willQoS, false, willMessage)) {
       Serial.println("MQTT Broker connected!");
       mqttStatus = 1;
       reconnectTime2 = 0;
@@ -218,8 +228,8 @@ void mqttConnection(const char *userName, const char *userPassword, const char *
       delay(250);
       reconnectTime2++;
     }
-    mqtt.subscribe("iotPower/2001/2333/command", BrokerPortQoS);  //订阅mqtt服务器的控制命令主题
-    mqtt.subscribe("iotPower/2001/2333/alarm", BrokerPortQoS);    //订阅mqtt服务器的控制命令主题
+    mqtt.subscribe(topicCommand, BrokerPortQoS);  //订阅mqtt服务器的控制命令主题
+    mqtt.subscribe(topicAlarm, BrokerPortQoS);    //订阅mqtt服务器的控制命令主题
   }
 }
 
@@ -233,43 +243,43 @@ void mqttcallback(char *topic, byte *payload, unsigned int length) {
   }
   Serial.print("Payload: ");
   Serial.println(message);
-  if (strcmp(topic, "iotPower/2001/2333/command") == 0) {
-    if (message == "ledON") {
-      Serial.println("Turning LED ON");
+  if (strcmp(topic, topicCommand) == 0) {
+    if (message == "powerON") {
       digitalWrite(ledPin, HIGH);    // 点亮 LED 灯
       digitalWrite(relayPin, HIGH);  // 闭合继电器
       switchStatus = 1;
-    } else if (message == "ledOFF") {
-      Serial.println("Turning LED OFF");
+      mqtt.publish(topicStatus, "powerOntrue", false);
+    } else if (message == "powerOFF") {
       digitalWrite(ledPin, LOW);
       digitalWrite(relayPin, LOW);
       switchStatus = 0;
+      mqtt.publish(topicStatus, "powerOFFtrue", false);
     } else {
       Serial.println("Unknown message received");
     }
-  } else if (strcmp(topic, "iotPower/2001/2333/alarm") == 0) {
+  } else if (strcmp(topic, topicAlarm) == 0) {
     int num = message[0] - '1';
     bool isEffect = (message[1] == '1');
-    bool isLoop = (message[3] == '1');
     if (isEffect) {
       bool exceptStatus = (message[2] == '1');
+      bool isOnly = (message[3] == '1');
       bool triggerDaysOfWeek[7];
       int triggerHour, triggerMinute;
-      if (isLoop) {
-        for (int i = 0; i < 7; i++) {
-          triggerDaysOfWeek[i] = (message.charAt(i + 4) == '1');
-          Serial.print("1");
-        }
-      } else {
+      if (isOnly) {
         for (int i = 0; i < 7; i++)
           triggerDaysOfWeek[i] = true;
-        Serial.print("2");
+        triggerHour = message.substring(11, 13).toInt();
+        triggerMinute = message.substring(13, 15).toInt();
+      } else {
+        for (int i = 0; i < 7; i++) {
+          triggerDaysOfWeek[i] = (message.charAt(i + 4) == '1');
+        }
+        String subString1 = message.substring(11, 13);
+        String subString2 = message.substring(13, 15);
+        triggerHour = subString1.toInt();
+        triggerMinute = subString2.toInt();
       }
-      String subString1 = message.substring(11, 13);
-      String subString2 = message.substring(13, 15);
-      triggerHour = subString1.toInt();
-      triggerMinute = subString2.toInt();
-      addTimer(num, isEffect, isLoop, exceptStatus, triggerDaysOfWeek, triggerHour, triggerMinute);
+      addTimer(num, isEffect, exceptStatus, isOnly, triggerDaysOfWeek, triggerHour, triggerMinute);
     } else
       Serial.println("The timer is not effective!");
   }
@@ -299,24 +309,25 @@ void checkMqttConnection() {
   }
 }
 
-void publishStatus() {
+void uploadStatus() {
+  float temperature = sensors.getTempCByIndex(0);
+  delay(100);
   StaticJsonDocument<200> doc;
-  doc["powerUid"] = 114514;
+  doc["powerUid"] = appEquipmentname;
+  doc["switch"] = switchStatus;
   JsonObject data = doc.createNestedObject("data");
-  data["iotConnect"] = mqttStatus;
-  data["iotSwitch"] = switchStatus;
-  data["dailyPower"] = dailyElectricity;
+  data["dailyElectricity"] = dailyElectricity;
   data["currentPower"] = currentPower;
-  data["temperature"] = sensors.getTempCByIndex(0);
+  data["currentTemperature"] = temperature;
   char buffer[512];
   serializeJson(doc, buffer);
-  mqtt.publish("iotPower/2001/2333/status", buffer, true);
+  mqtt.publish(topicUpload, buffer, false);
 }
 
-void addTimer(int num, bool isEffect, bool isLoop, bool exceptStatus, bool *triggerDaysOfWeek, int triggerHour, int triggerMinute) {
+void addTimer(int num, bool isEffect, bool exceptStatus, bool isOnly, bool* triggerDaysOfWeek, int triggerHour, int triggerMinute) {
   timers[num].isEffect = isEffect;
-  timers[num].isLoop = isLoop;
   timers[num].exceptStatus = exceptStatus;
+  timers[num].isOnly = isOnly;
   for (int i = 0; i < 7; i++) {
     timers[num].triggerDaysOfWeek[i] = triggerDaysOfWeek[i];
   }
@@ -324,21 +335,6 @@ void addTimer(int num, bool isEffect, bool isLoop, bool exceptStatus, bool *trig
   timers[num].triggerMinute = triggerMinute;
 }
 
-void checkTimers() {
-  for (int i = 0; i < size; i++) {
-    if (timers[i].isEffect && timers[i].triggerDaysOfWeek[now.DayOfWeek()] && timers[i].triggerHour == now.Hour() && timers[i].triggerMinute == now.Minute()) {
-      if (timers[i].isLoop) {
-        if (millis() - previousTriggerTime >= triggerInterval) {
-          Serial.println("triggered successfully!");
-          previousTriggerTime = millis();
-        }
-      } else {
-        Serial.println("triggered successfully and delete the timer!");
-        timers[i].isEffect = false;
-      }
-    }
-  }
-}
 
 void getPower() {
   Serial2.write(Tx_Buffer, 8);
@@ -357,7 +353,6 @@ void protection() {
     digitalWrite(ledPin, LOW);    // 熄灭 LED 灯
     digitalWrite(relayPin, LOW);  // 继电器不触发
     switchStatus = 0;
-    Serial.println("System protection is triggered!");
   }
 }
 
@@ -405,6 +400,25 @@ void readBLE() {
       digitalWrite(ledPin, LOW);    // 熄灭 LED 灯
       digitalWrite(relayPin, LOW);  // 继电器不触发
       switchStatus = 0;
+    }
+  }
+}
+
+void checkTimers() {
+  for (int i = 0; i < size; i++) {
+    if (timers[i].isEffect && timers[i].triggerDaysOfWeek[now.DayOfWeek()] && timers[i].triggerHour == now.Hour() && timers[i].triggerMinute == now.Minute() && millis() - previousTriggerTime >= triggerInterval) {
+      switchStatus = timers[i].exceptStatus;
+      if (switchStatus) {
+        digitalWrite(ledPin, HIGH);    // 点亮 LED 灯
+        digitalWrite(relayPin, HIGH);  // 继电器触发
+      } else {
+        digitalWrite(ledPin, LOW);    // 关闭 LED 灯
+        digitalWrite(relayPin, LOW);  // 继电器关闭
+      }
+      if (timers[i].isOnly) {
+        timers[i].isEffect = false;
+      }
+      previousTriggerTime = millis();
     }
   }
 }
